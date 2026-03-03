@@ -38,20 +38,20 @@ python app.py --symbol MSFT
 ## Proxy / TLS (corporate network)
 Set proxy variables in the same PowerShell session before running:
 ```powershell
-$env:HTTP_PROXY = "http://cso.proxy.att.com:8080"
-$env:HTTPS_PROXY = "http://cso.proxy.att.com:8080"
+$env:HTTP_PROXY = "<YOUR_PROXY>"
+$env:HTTPS_PROXY = "<YOUR_PROXY>"
 python app.py
 ```
 
 If TLS inspection is enabled, set your corporate CA bundle:
 ```powershell
-$env:REQUESTS_CA_BUNDLE = "C:\path\corp-root-ca.pem"
+$env:REQUESTS_CA_BUNDLE = "<CA_PATH>"
 python app.py
 ```
 
 Or pass CA bundle directly:
 ```powershell
-python app.py --ca-bundle "C:\path\corp-root-ca.pem"
+python app.py --ca-bundle "<CA_PATH>"
 ```
 
 Temporary troubleshooting only (not recommended):
