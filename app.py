@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
+import queue
 import threading
 import time
 from zoneinfo import ZoneInfo
@@ -29,6 +30,8 @@ class ShareMetrics:
     daily_change_dollar: float
     daily_change_percent: float
     market_open: bool
+    history: list[float]
+    history_dates: list[str]
 
 
 def is_nyse_open(now: datetime | None = None) -> bool:
@@ -62,7 +65,7 @@ def get_tls_verify_setting() -> bool | str:
     return True
 
 
-def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list[tuple[float, float]]:
+def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list[tuple[str, float, float]]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {
         "range": "7d",
@@ -85,15 +88,18 @@ def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list
     if not results:
         raise ValueError("Yahoo API returned no results.")
 
-    quote = (((results[0].get("indicators") or {}).get("quote") or [{}])[0])
+    result = results[0]
+    quote = (((result.get("indicators") or {}).get("quote") or [{}])[0])
     opens = quote.get("open") or []
     closes = quote.get("close") or []
+    timestamps = result.get("timestamp") or []
 
-    rows: list[tuple[float, float]] = []
-    for open_value, close_value in zip(opens, closes):
+    rows: list[tuple[str, float, float]] = []
+    for ts_value, open_value, close_value in zip(timestamps, opens, closes):
         if open_value is None or close_value is None:
             continue
-        rows.append((float(open_value), float(close_value)))
+        date_label = datetime.fromtimestamp(ts_value, NYSE_TZ).strftime("%b-%d")
+        rows.append((date_label, float(open_value), float(close_value)))
 
     if len(rows) < 2:
         raise ValueError("Could not load enough valid OHLC rows from Yahoo data.")
@@ -101,12 +107,12 @@ def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list
     return rows
 
 
-def fetch_supported_symbols() -> set[str]:
+def fetch_supported_symbols() -> dict[str, str]:
     proxy = get_runtime_proxy()
     verify = get_tls_verify_setting()
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
-    symbols: set[str] = set()
+    symbols: dict[str, str] = {}
 
     other_response = requests.get(NYSE_SYMBOLS_URL, timeout=20, proxies=proxies, verify=verify)
     other_response.raise_for_status()
@@ -117,6 +123,7 @@ def fetch_supported_symbols() -> set[str]:
     other_header = other_lines[0].split("|")
     try:
         other_symbol_idx = other_header.index("ACT Symbol")
+        other_name_idx = other_header.index("Security Name")
     except ValueError as exc:
         raise ValueError("Unexpected otherlisted symbols format.") from exc
 
@@ -124,11 +131,12 @@ def fetch_supported_symbols() -> set[str]:
         if line.startswith("File Creation Time"):
             continue
         parts = line.split("|")
-        if len(parts) <= other_symbol_idx:
+        if len(parts) <= max(other_symbol_idx, other_name_idx):
             continue
         symbol = parts[other_symbol_idx].strip().upper()
+        name = parts[other_name_idx].strip()
         if symbol and symbol != "ACT SYMBOL":
-            symbols.add(symbol)
+            symbols[symbol] = name
 
     nasdaq_response = requests.get(NASDAQ_SYMBOLS_URL, timeout=20, proxies=proxies, verify=verify)
     nasdaq_response.raise_for_status()
@@ -139,6 +147,7 @@ def fetch_supported_symbols() -> set[str]:
     nasdaq_header = nasdaq_lines[0].split("|")
     try:
         nasdaq_symbol_idx = nasdaq_header.index("Symbol")
+        nasdaq_name_idx = nasdaq_header.index("Security Name")
     except ValueError as exc:
         raise ValueError("Unexpected nasdaqlisted symbols format.") from exc
 
@@ -146,11 +155,12 @@ def fetch_supported_symbols() -> set[str]:
         if line.startswith("File Creation Time"):
             continue
         parts = line.split("|")
-        if len(parts) <= nasdaq_symbol_idx:
+        if len(parts) <= max(nasdaq_symbol_idx, nasdaq_name_idx):
             continue
         symbol = parts[nasdaq_symbol_idx].strip().upper()
+        name = parts[nasdaq_name_idx].strip()
         if symbol and symbol != "SYMBOL":
-            symbols.add(symbol)
+            symbols.setdefault(symbol, name)
 
     if not symbols:
         raise ValueError("Symbol sources parsed but no symbols were found.")
@@ -174,8 +184,10 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
 
     nyse_open = is_nyse_open()
 
-    latest_open, latest_close = rows[-1]
-    _, previous_close = rows[-2]
+    _, latest_open, latest_close = rows[-1]
+    _, _, previous_close = rows[-2]
+    history = [close for _date, _open, close in rows]
+    history_dates = [date for date, _open, _close in rows]
 
     today_open = latest_open
 
@@ -194,6 +206,8 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
         daily_change_dollar=daily_change_dollar,
         daily_change_percent=daily_change_percent,
         market_open=nyse_open,
+        history=history,
+        history_dates=history_dates,
     )
 
 
@@ -201,6 +215,7 @@ class ShareCardApp:
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol.upper()
         self.nyse_symbols: set[str] | None = None
+        self.symbol_names: dict[str, str] = {}
         self.sorted_symbols: list[str] = []
         self.symbol_catalog_error: str | None = None
         self.symbol_catalog_loading = False
@@ -209,20 +224,39 @@ class ShareCardApp:
         self.suggestion_frame: tk.Toplevel | None = None
         self.suggestion_scrollbar: tk.Scrollbar | None = None
         self.suggestion_list: tk.Listbox | None = None
+        self.suppress_suggestions_once = False
+        self.chart_canvas: tk.Canvas | None = None
+        self.last_history: list[float] = []
+        self.last_history_dates: list[str] = []
+        self.symbol_catalog_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
-        self.bg_color = "#eef1f6"
-        self.card_bg = "#ffffff"
-        self.text_primary = "#1b1f24"
-        self.text_muted = "#6b7280"
+        self.bg_color = "SystemButtonFace"
+        self.card_bg = "SystemWindow"
+        self.text_primary = "SystemWindowText"
+        self.text_muted = "SystemGrayText"
         self.positive_color = "#0f766e"
         self.negative_color = "#b91c1c"
 
         self.root = tk.Tk()
         self.root.title(f"{self.symbol}")
-        self.root.geometry("420x320")
-        self.root.minsize(360, 280)
+        self.root.geometry("440x430")
+        self.root.minsize(380, 380)
         self.root.resizable(True, True)
         self.root.configure(bg=self.bg_color)
+        icon_path = Path(__file__).with_name("app.ico")
+        if icon_path.exists():
+            try:
+                self.root.iconbitmap(str(icon_path))
+            except tk.TclError:
+                pass
+        png_icon_path = Path(__file__).with_name("Icon.png")
+        if png_icon_path.exists():
+            try:
+                icon_image = tk.PhotoImage(file=str(png_icon_path))
+                self.root.iconphoto(True, icon_image)
+                self._icon_image = icon_image
+            except tk.TclError:
+                pass
 
         card = tk.Frame(self.root, bg=self.card_bg, bd=1, relief="solid", padx=16, pady=14)
         card.pack(fill="both", expand=True, padx=20, pady=18)
@@ -265,6 +299,7 @@ class ShareCardApp:
         self.symbol_entry.bind("<Return>", self.load_symbol)
         self.symbol_entry.bind("<KeyRelease>", self.schedule_symbol_validation)
         self.symbol_entry.bind("<Down>", self.focus_suggestion_list)
+        self.symbol_entry.bind("<FocusOut>", self.hide_symbol_suggestions)
 
         load_button = tk.Button(
             symbol_row,
@@ -274,9 +309,9 @@ class ShareCardApp:
             relief="flat",
             bd=0,
             highlightthickness=0,
-            bg="#e5e7eb",
-            activebackground="#d1d5db",
-            fg=self.text_primary,
+            bg="SystemButtonFace",
+            activebackground="SystemButtonFace",
+            fg="SystemButtonText",
         )
         load_button.pack(side="left")
 
@@ -284,7 +319,7 @@ class ShareCardApp:
         self.suggestion_frame.withdraw()
         self.suggestion_frame.overrideredirect(True)
         self.suggestion_frame.attributes("-topmost", True)
-        self.suggestion_frame.configure(bg="white")
+        self.suggestion_frame.configure(bg=self.card_bg, bd=1, relief="solid")
 
         self.suggestion_scrollbar = tk.Scrollbar(self.suggestion_frame, orient="vertical")
         self.suggestion_list = tk.Listbox(
@@ -292,16 +327,20 @@ class ShareCardApp:
             height=8,
             font=("Segoe UI", 9),
             yscrollcommand=self.suggestion_scrollbar.set,
-            borderwidth=0,
-            highlightthickness=0,
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="SystemButtonShadow",
         )
         self.suggestion_scrollbar.config(command=self.suggestion_list.yview)
         self.suggestion_list.pack(side="left", fill="both", expand=True)
         self.suggestion_scrollbar.pack(side="right", fill="y")
         self.suggestion_list.bind("<<ListboxSelect>>", self.apply_selected_suggestion)
+        self.suggestion_list.bind("<ButtonRelease-1>", self.apply_and_load_suggestion)
         self.suggestion_list.bind("<Double-Button-1>", self.apply_and_load_suggestion)
         self.suggestion_list.bind("<Return>", self.apply_and_load_suggestion)
         self.suggestion_frame.withdraw()
+
+        self.root.bind("<Button-1>", self.on_global_click, add=True)
 
         self.validation_label = tk.Label(
             card,
@@ -346,6 +385,26 @@ class ShareCardApp:
         self.change_dollar_label = tk.Label(info_frame, text="--", **value_style)
         self.change_dollar_label.grid(row=3, column=1, sticky="e", pady=2)
 
+        trend_label = tk.Label(
+            card,
+            text="7-day trend",
+            font=("Helvetica Neue", 9),
+            bg=self.card_bg,
+            fg=self.text_muted,
+            anchor="w",
+        )
+        trend_label.pack(fill="x", pady=(10, 4))
+
+        self.chart_canvas = tk.Canvas(
+            card,
+            height=110,
+            bg=self.card_bg,
+            highlightthickness=1,
+            highlightbackground="SystemButtonShadow",
+        )
+        self.chart_canvas.pack(fill="x")
+        self.chart_canvas.bind("<Configure>", self.on_chart_resize)
+
         refresh_button = tk.Button(
             card,
             text="Refresh",
@@ -354,13 +413,14 @@ class ShareCardApp:
             relief="flat",
             bd=0,
             highlightthickness=0,
-            bg="#e5e7eb",
-            activebackground="#d1d5db",
-            fg=self.text_primary,
+            bg="SystemButtonFace",
+            activebackground="SystemButtonFace",
+            fg="SystemButtonText",
         )
         refresh_button.pack(anchor="e", pady=(12, 0))
 
         self.start_symbol_catalog_refresh(force=True)
+        self.root.after(100, self.process_symbol_catalog_queue)
         self.refresh()
 
     def update_title(self, symbol: str) -> None:
@@ -387,7 +447,9 @@ class ShareCardApp:
             self.symbol_var.set(previous_symbol)
             self.update_title(previous_symbol)
         else:
-            self.validation_label.config(text="Valid US-listed symbol.", fg="green")
+            company = self.symbol_names.get(candidate, "").strip()
+            label_text = company or "Valid US-listed symbol."
+            self.validation_label.config(text=label_text, fg="green")
 
     def schedule_symbol_validation(self, _event: object | None = None) -> None:
         if self.symbol_validation_after_id:
@@ -415,11 +477,17 @@ class ShareCardApp:
             return
 
         if candidate in self.nyse_symbols:
-            self.validation_label.config(text="Valid US-listed symbol.", fg="green")
+            company = self.symbol_names.get(candidate, "").strip()
+            label_text = company or "Valid US-listed symbol."
+            self.validation_label.config(text=label_text, fg="green")
         else:
             self.validation_label.config(text="Symbol not found in US symbol list.", fg="red")
 
     def update_symbol_suggestions(self) -> None:
+        if self.suppress_suggestions_once:
+            self.suppress_suggestions_once = False
+            self.hide_symbol_suggestions()
+            return
         candidate = self.symbol_var.get().strip().upper()
         if not candidate or not self.sorted_symbols:
             self.hide_symbol_suggestions()
@@ -444,20 +512,43 @@ class ShareCardApp:
         entry_y = self.symbol_entry.winfo_rooty()
         entry_w = self.symbol_entry.winfo_width()
         entry_h = self.symbol_entry.winfo_height()
-        visible_rows = min(10, len(matches))
-        popup_h = visible_rows * 20 + 2
+        row_height = 20
+        screen_h = self.root.winfo_screenheight()
+        margin = 8
+        space_below = screen_h - (entry_y + entry_h) - margin
+        space_above = entry_y - margin
+        place_above = space_below < row_height * 3 and space_above > space_below
+        available_px = space_above if place_above else space_below
+        visible_rows = max(1, min(10, len(matches), max(1, available_px // row_height)))
+        popup_h = visible_rows * row_height + 2
 
         self.suggestion_list.delete(0, tk.END)
         for item in matches:
             self.suggestion_list.insert(tk.END, item)
         self.suggestion_list.config(height=visible_rows)
-        self.suggestion_frame.geometry(f"{entry_w + 18}x{popup_h}+{entry_x}+{entry_y + entry_h + 2}")
+        if place_above:
+            popup_y = max(margin, entry_y - popup_h - 2)
+        else:
+            popup_y = entry_y + entry_h + 2
+        self.suggestion_frame.geometry(f"{entry_w + 18}x{popup_h}+{entry_x}+{popup_y}")
         self.suggestion_frame.deiconify()
         self.suggestion_frame.lift()
 
-    def hide_symbol_suggestions(self) -> None:
+    def hide_symbol_suggestions(self, _event: object | None = None) -> None:
         if self.suggestion_frame is not None:
             self.suggestion_frame.withdraw()
+
+    def on_global_click(self, event: tk.Event) -> None:
+        if self.suggestion_frame is None or self.suggestion_list is None:
+            return
+        if not self.suggestion_frame.winfo_ismapped():
+            return
+        target = event.widget
+        if target in (self.symbol_entry, self.suggestion_list, self.suggestion_scrollbar):
+            return
+        if self.suggestion_frame.winfo_containing(event.x_root, event.y_root) is not None:
+            return
+        self.hide_symbol_suggestions()
 
     def focus_suggestion_list(self, _event: object | None = None) -> str | None:
         if self.suggestion_list is not None and self.suggestion_list.winfo_ismapped() and self.suggestion_list.size() > 0:
@@ -481,6 +572,7 @@ class ShareCardApp:
         self.apply_selected_suggestion()
         self.hide_symbol_suggestions()
         self.symbol_entry.focus_set()
+        self.suppress_suggestions_once = True
         self.load_symbol()
         return "break"
 
@@ -501,13 +593,24 @@ class ShareCardApp:
     def _refresh_symbol_catalog_worker(self) -> None:
         try:
             symbols = fetch_supported_symbols()
-            self.root.after(0, lambda: self._on_symbol_catalog_loaded(symbols))
+            self.symbol_catalog_queue.put(("ok", symbols))
         except Exception as exc:
-            self.root.after(0, lambda: self._on_symbol_catalog_failed(str(exc)))
+            self.symbol_catalog_queue.put(("err", str(exc)))
 
-    def _on_symbol_catalog_loaded(self, symbols: set[str]) -> None:
-        self.nyse_symbols = symbols
-        self.sorted_symbols = sorted(symbols)
+    def process_symbol_catalog_queue(self) -> None:
+        while not self.symbol_catalog_queue.empty():
+            status, payload = self.symbol_catalog_queue.get()
+            if status == "ok":
+                self._on_symbol_catalog_loaded(payload)
+            else:
+                self._on_symbol_catalog_failed(payload)
+        if self.root.winfo_exists():
+            self.root.after(100, self.process_symbol_catalog_queue)
+
+    def _on_symbol_catalog_loaded(self, symbols: dict[str, str]) -> None:
+        self.symbol_names = symbols
+        self.nyse_symbols = set(symbols.keys())
+        self.sorted_symbols = sorted(self.nyse_symbols)
         self.symbol_catalog_error = None
         self.symbol_catalog_loading = False
         self.symbol_cache_timestamp = time.time()
@@ -533,7 +636,7 @@ class ShareCardApp:
             messagebox.showerror("Data Error", str(exc))
             return False
 
-        close_suffix = "(Prev Day, NYSE Open)" if data.market_open else ""
+        close_suffix = "(Prev Day, Market Open)" if data.market_open else ""
 
         self.symbol = data.symbol
         self.symbol_var.set(data.symbol)
@@ -547,10 +650,135 @@ class ShareCardApp:
         self.change_dollar_label.config(text=f"${data.daily_change_dollar:+,.2f}", fg=change_color)
         self.status_label.config(text="Quote updated.", fg=self.text_muted)
         self.update_symbol_input_state()
+        self.draw_trend(data.history, data.history_dates)
         return True
 
     def run(self) -> None:
         self.root.mainloop()
+
+    def on_chart_resize(self, _event: tk.Event) -> None:
+        if self.last_history:
+            self.draw_trend(self.last_history, self.last_history_dates)
+
+    def draw_trend(self, history: list[float], history_dates: list[str]) -> None:
+        if self.chart_canvas is None:
+            return
+        if not history:
+            self.chart_canvas.delete("trend")
+            return
+
+        self.last_history = history
+        self.last_history_dates = history_dates
+        self.chart_canvas.delete("trend")
+
+        self.root.update_idletasks()
+        width = max(1, self.chart_canvas.winfo_width())
+        height = max(1, self.chart_canvas.winfo_height())
+        left_pad = 54
+        right_pad = 10
+        top_pad = 8
+        bottom_pad = 26
+        inner_w = max(1, width - left_pad - right_pad)
+        inner_h = max(1, height - top_pad - bottom_pad)
+
+        min_val = min(history)
+        max_val = max(history)
+        if max_val == min_val:
+            max_val = min_val + 1.0
+        span = max_val - min_val
+        min_val -= span * 0.02
+        max_val += span * 0.02
+        span = max_val - min_val
+
+        step_x = inner_w / max(1, len(history) - 1)
+        points: list[float] = []
+        for idx, value in enumerate(history):
+            x = left_pad + idx * step_x
+            ratio = (value - min_val) / span
+            y = top_pad + (1.0 - ratio) * inner_h
+            points.extend([x, y])
+
+        grid_color = "SystemButtonShadow"
+        label_color = self.text_muted
+
+        for i in range(5):
+            y = top_pad + i * (inner_h / 4)
+            self.chart_canvas.create_line(
+                left_pad,
+                y,
+                left_pad + inner_w,
+                y,
+                fill=grid_color,
+                width=1,
+                tags="trend",
+            )
+            value = max_val - (span * i / 4)
+            self.chart_canvas.create_text(
+                left_pad - 6,
+                y,
+                text=f"{value:,.2f}",
+                anchor="e",
+                fill=label_color,
+                font=("Segoe UI", 8),
+                tags="trend",
+            )
+
+        if len(history) > 1:
+            for idx in range(len(history)):
+                x = left_pad + idx * step_x
+                self.chart_canvas.create_line(
+                    x,
+                    top_pad,
+                    x,
+                    top_pad + inner_h,
+                    fill=grid_color,
+                    width=1,
+                    tags="trend",
+                )
+
+        self.chart_canvas.create_line(
+            left_pad,
+            top_pad,
+            left_pad,
+            top_pad + inner_h,
+            fill=grid_color,
+            width=1,
+            tags="trend",
+        )
+        self.chart_canvas.create_line(
+            left_pad,
+            top_pad + inner_h,
+            left_pad + inner_w,
+            top_pad + inner_h,
+            fill=grid_color,
+            width=1,
+            tags="trend",
+        )
+
+        if len(history) >= 2:
+            start_label = history_dates[0] if history_dates else f"D-{len(history) - 1}"
+            end_label = history_dates[-1] if history_dates else "D0"
+            self.chart_canvas.create_text(
+                left_pad,
+                top_pad + inner_h + 12,
+                text=start_label,
+                anchor="w",
+                fill=label_color,
+                font=("Segoe UI", 8),
+                tags="trend",
+            )
+            self.chart_canvas.create_text(
+                left_pad + inner_w,
+                top_pad + inner_h + 12,
+                text=end_label,
+                anchor="e",
+                fill=label_color,
+                font=("Segoe UI", 8),
+                tags="trend",
+            )
+
+        line_color = self.positive_color if history[-1] >= history[0] else self.negative_color
+        self.chart_canvas.create_line(*points, fill=line_color, width=2, smooth=True, tags="trend")
 
 
 def parse_args() -> argparse.Namespace:
