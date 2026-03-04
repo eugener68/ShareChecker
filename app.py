@@ -206,45 +206,86 @@ class ShareCardApp:
         self.symbol_catalog_loading = False
         self.symbol_cache_timestamp = 0.0
         self.symbol_validation_after_id: str | None = None
-        self.suggestion_frame: tk.Frame | None = None
+        self.suggestion_frame: tk.Toplevel | None = None
         self.suggestion_scrollbar: tk.Scrollbar | None = None
         self.suggestion_list: tk.Listbox | None = None
 
+        self.bg_color = "#eef1f6"
+        self.card_bg = "#ffffff"
+        self.text_primary = "#1b1f24"
+        self.text_muted = "#6b7280"
+        self.positive_color = "#0f766e"
+        self.negative_color = "#b91c1c"
+
         self.root = tk.Tk()
         self.root.title(f"{self.symbol}")
-        self.root.geometry("350x265")
-        self.root.resizable(False, False)
-        self.root.configure(bg="#f5f5f5")
+        self.root.geometry("420x320")
+        self.root.minsize(360, 280)
+        self.root.resizable(True, True)
+        self.root.configure(bg=self.bg_color)
 
-        card = tk.Frame(self.root, bg="white", bd=1, relief="solid", padx=14, pady=12)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=320, height=230)
+        card = tk.Frame(self.root, bg=self.card_bg, bd=1, relief="solid", padx=16, pady=14)
+        card.pack(fill="both", expand=True, padx=20, pady=18)
 
         self.title_label = tk.Label(
             card,
             text=f"{self.symbol}",
-            font=("Segoe UI", 14, "bold"),
-            bg="white",
+            font=("Helvetica Neue", 16, "bold"),
+            bg=self.card_bg,
+            fg=self.text_primary,
             anchor="w",
         )
-        self.title_label.pack(fill="x", pady=(0, 8))
+        self.title_label.pack(fill="x", pady=(0, 4))
 
-        symbol_row = tk.Frame(card, bg="white")
-        symbol_row.pack(fill="x", pady=(0, 8))
+        self.status_label = tk.Label(
+            card,
+            text="Fetching latest quote...",
+            font=("Helvetica Neue", 10),
+            bg=self.card_bg,
+            fg=self.text_muted,
+            anchor="w",
+        )
+        self.status_label.pack(fill="x", pady=(0, 10))
 
-        symbol_label = tk.Label(symbol_row, text="Symbol:", font=("Segoe UI", 10), bg="white")
+        symbol_row = tk.Frame(card, bg=self.card_bg)
+        symbol_row.pack(fill="x", pady=(0, 10))
+
+        symbol_label = tk.Label(
+            symbol_row,
+            text="Symbol",
+            font=("Helvetica Neue", 10, "bold"),
+            bg=self.card_bg,
+            fg=self.text_primary,
+        )
         symbol_label.pack(side="left")
 
         self.symbol_var = tk.StringVar(value=self.symbol)
-        self.symbol_entry = tk.Entry(symbol_row, textvariable=self.symbol_var, width=12)
-        self.symbol_entry.pack(side="left", padx=(6, 6))
+        self.symbol_entry = tk.Entry(symbol_row, textvariable=self.symbol_var, width=12, relief="solid")
+        self.symbol_entry.pack(side="left", padx=(8, 8), ipadx=2, ipady=1)
         self.symbol_entry.bind("<Return>", self.load_symbol)
         self.symbol_entry.bind("<KeyRelease>", self.schedule_symbol_validation)
         self.symbol_entry.bind("<Down>", self.focus_suggestion_list)
 
-        load_button = tk.Button(symbol_row, text="Load", command=self.load_symbol)
+        load_button = tk.Button(
+            symbol_row,
+            text="Load",
+            command=self.load_symbol,
+            takefocus=0,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            bg="#e5e7eb",
+            activebackground="#d1d5db",
+            fg=self.text_primary,
+        )
         load_button.pack(side="left")
 
-        self.suggestion_frame = tk.Frame(self.root, bd=1, relief="solid", bg="white")
+        self.suggestion_frame = tk.Toplevel(self.root)
+        self.suggestion_frame.withdraw()
+        self.suggestion_frame.overrideredirect(True)
+        self.suggestion_frame.attributes("-topmost", True)
+        self.suggestion_frame.configure(bg="white")
+
         self.suggestion_scrollbar = tk.Scrollbar(self.suggestion_frame, orient="vertical")
         self.suggestion_list = tk.Listbox(
             self.suggestion_frame,
@@ -260,25 +301,64 @@ class ShareCardApp:
         self.suggestion_list.bind("<<ListboxSelect>>", self.apply_selected_suggestion)
         self.suggestion_list.bind("<Double-Button-1>", self.apply_and_load_suggestion)
         self.suggestion_list.bind("<Return>", self.apply_and_load_suggestion)
-        self.suggestion_frame.place_forget()
+        self.suggestion_frame.withdraw()
 
-        self.validation_label = tk.Label(card, text="", font=("Segoe UI", 9), bg="white", anchor="w")
-        self.validation_label.pack(fill="x", pady=(0, 6))
+        self.validation_label = tk.Label(
+            card,
+            text="",
+            font=("Helvetica Neue", 9),
+            bg=self.card_bg,
+            fg=self.text_muted,
+            anchor="w",
+        )
+        self.validation_label.pack(fill="x", pady=(0, 8))
 
-        self.opening_label = tk.Label(card, text="", font=("Segoe UI", 10), bg="white", anchor="w")
-        self.opening_label.pack(fill="x")
+        info_frame = tk.Frame(card, bg=self.card_bg)
+        info_frame.pack(fill="x")
+        info_frame.columnconfigure(1, weight=1)
 
-        self.close_label = tk.Label(card, text="", font=("Segoe UI", 10), bg="white", anchor="w")
-        self.close_label.pack(fill="x", pady=(2, 0))
+        label_style = {
+            "font": ("Helvetica Neue", 10),
+            "bg": self.card_bg,
+            "fg": self.text_muted,
+            "anchor": "w",
+        }
+        value_style = {
+            "font": ("Helvetica Neue", 11, "bold"),
+            "bg": self.card_bg,
+            "fg": self.text_primary,
+            "anchor": "e",
+        }
 
-        self.change_pct_label = tk.Label(card, text="", font=("Segoe UI", 10), bg="white", anchor="w")
-        self.change_pct_label.pack(fill="x", pady=(2, 0))
+        tk.Label(info_frame, text="Open", **label_style).grid(row=0, column=0, sticky="w", pady=2)
+        self.opening_label = tk.Label(info_frame, text="--", **value_style)
+        self.opening_label.grid(row=0, column=1, sticky="e", pady=2)
 
-        self.change_dollar_label = tk.Label(card, text="", font=("Segoe UI", 10), bg="white", anchor="w")
-        self.change_dollar_label.pack(fill="x", pady=(2, 0))
+        tk.Label(info_frame, text="Close", **label_style).grid(row=1, column=0, sticky="w", pady=2)
+        self.close_label = tk.Label(info_frame, text="--", **value_style)
+        self.close_label.grid(row=1, column=1, sticky="e", pady=2)
 
-        refresh_button = tk.Button(card, text="Refresh", command=self.refresh)
-        refresh_button.pack(anchor="e", pady=(10, 0))
+        tk.Label(info_frame, text="Daily Change %", **label_style).grid(row=2, column=0, sticky="w", pady=2)
+        self.change_pct_label = tk.Label(info_frame, text="--", **value_style)
+        self.change_pct_label.grid(row=2, column=1, sticky="e", pady=2)
+
+        tk.Label(info_frame, text="Daily Change $", **label_style).grid(row=3, column=0, sticky="w", pady=2)
+        self.change_dollar_label = tk.Label(info_frame, text="--", **value_style)
+        self.change_dollar_label.grid(row=3, column=1, sticky="e", pady=2)
+
+        refresh_button = tk.Button(
+            card,
+            text="Refresh",
+            command=self.refresh,
+            takefocus=0,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            bg="#e5e7eb",
+            activebackground="#d1d5db",
+            fg=self.text_primary,
+        )
+        refresh_button.pack(anchor="e", pady=(12, 0))
 
         self.start_symbol_catalog_refresh(force=True)
         self.refresh()
@@ -360,8 +440,8 @@ class ShareCardApp:
             return
 
         self.root.update_idletasks()
-        entry_x = self.symbol_entry.winfo_rootx() - self.root.winfo_rootx()
-        entry_y = self.symbol_entry.winfo_rooty() - self.root.winfo_rooty()
+        entry_x = self.symbol_entry.winfo_rootx()
+        entry_y = self.symbol_entry.winfo_rooty()
         entry_w = self.symbol_entry.winfo_width()
         entry_h = self.symbol_entry.winfo_height()
         visible_rows = min(10, len(matches))
@@ -371,12 +451,13 @@ class ShareCardApp:
         for item in matches:
             self.suggestion_list.insert(tk.END, item)
         self.suggestion_list.config(height=visible_rows)
-        self.suggestion_frame.place(x=entry_x, y=entry_y + entry_h + 2, width=entry_w + 18, height=popup_h)
+        self.suggestion_frame.geometry(f"{entry_w + 18}x{popup_h}+{entry_x}+{entry_y + entry_h + 2}")
+        self.suggestion_frame.deiconify()
         self.suggestion_frame.lift()
 
     def hide_symbol_suggestions(self) -> None:
         if self.suggestion_frame is not None:
-            self.suggestion_frame.place_forget()
+            self.suggestion_frame.withdraw()
 
     def focus_suggestion_list(self, _event: object | None = None) -> str | None:
         if self.suggestion_list is not None and self.suggestion_list.winfo_ismapped() and self.suggestion_list.size() > 0:
@@ -438,9 +519,17 @@ class ShareCardApp:
         self.update_symbol_input_state()
 
     def refresh(self) -> bool:
+        self.status_label.config(text="Fetching latest quote...", fg=self.text_muted)
+        self.root.update_idletasks()
+
         try:
             data = fetch_metrics(self.symbol)
         except Exception as exc:
+            self.status_label.config(text="Unable to load quote. Check network and try again.", fg=self.negative_color)
+            self.opening_label.config(text="--", fg=self.text_primary)
+            self.close_label.config(text="--", fg=self.text_primary)
+            self.change_pct_label.config(text="--", fg=self.text_primary)
+            self.change_dollar_label.config(text="--", fg=self.text_primary)
             messagebox.showerror("Data Error", str(exc))
             return False
 
@@ -450,10 +539,13 @@ class ShareCardApp:
         self.symbol_var.set(data.symbol)
         self.update_title(data.symbol)
 
-        self.opening_label.config(text=f"Opening Price: ${data.opening_price:,.2f}")
-        self.close_label.config(text=f"Close Price: ${data.close_price_for_card:,.2f} {close_suffix}".rstrip())
-        self.change_pct_label.config(text=f"Daily Change (%): {data.daily_change_percent:+.2f}%")
-        self.change_dollar_label.config(text=f"Daily Change ($): ${data.daily_change_dollar:+,.2f}")
+        change_color = self.positive_color if data.daily_change_dollar >= 0 else self.negative_color
+
+        self.opening_label.config(text=f"${data.opening_price:,.2f}")
+        self.close_label.config(text=f"${data.close_price_for_card:,.2f} {close_suffix}".rstrip())
+        self.change_pct_label.config(text=f"{data.daily_change_percent:+.2f}%", fg=change_color)
+        self.change_dollar_label.config(text=f"${data.daily_change_dollar:+,.2f}", fg=change_color)
+        self.status_label.config(text="Quote updated.", fg=self.text_muted)
         self.update_symbol_input_state()
         return True
 
