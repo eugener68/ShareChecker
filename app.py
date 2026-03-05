@@ -8,6 +8,7 @@ from pathlib import Path
 import queue
 import threading
 import time
+import subprocess
 from zoneinfo import ZoneInfo
 import sys
 import tkinter as tk
@@ -289,6 +290,16 @@ class ShareCardApp:
         self.trend_label: tk.Label | None = None
         self.chart_range_key = "1W"
         self.range_buttons: dict[str, tk.Label] = {}
+        self.is_dark_mode = False
+        self.card_frame: tk.Frame | None = None
+        self.symbol_row: tk.Frame | None = None
+        self.info_frame: tk.Frame | None = None
+        self.range_frame: tk.Frame | None = None
+        self.symbol_label: tk.Label | None = None
+        self.load_button: tk.Button | None = None
+        self.refresh_button: tk.Button | None = None
+        self.info_labels: list[tk.Label] = []
+        self.value_labels: list[tk.Label] = []
         self.last_history: list[float] = []
         self.last_history_dates: list[str] = []
         self.symbol_catalog_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -327,14 +338,12 @@ class ShareCardApp:
         self._init_colors()
         self.root.configure(bg=self.bg_color)
 
-        self.positive_color = "#0f766e"
-        self.negative_color = "#b91c1c"
 
-        card = tk.Frame(self.root, bg=self.card_bg, bd=1, relief="solid", padx=16, pady=14)
-        card.pack(fill="both", expand=True, padx=20, pady=18)
+        self.card_frame = tk.Frame(self.root, bg=self.card_bg, bd=1, relief="solid", padx=16, pady=14)
+        self.card_frame.pack(fill="both", expand=True, padx=20, pady=18)
 
         self.title_label = tk.Label(
-            card,
+            self.card_frame,
             text=f"{self.symbol}",
             font=("Helvetica Neue", 16, "bold"),
             bg=self.card_bg,
@@ -344,7 +353,7 @@ class ShareCardApp:
         self.title_label.pack(fill="x", pady=(0, 4))
 
         self.status_label = tk.Label(
-            card,
+            self.card_frame,
             text="Fetching latest quote...",
             font=("Helvetica Neue", 10),
             bg=self.card_bg,
@@ -353,31 +362,31 @@ class ShareCardApp:
         )
         self.status_label.pack(fill="x", pady=(0, 10))
 
-        symbol_row = tk.Frame(card, bg=self.card_bg)
-        symbol_row.pack(fill="x", pady=(0, 10))
+        self.symbol_row = tk.Frame(self.card_frame, bg=self.card_bg)
+        self.symbol_row.pack(fill="x", pady=(0, 10))
 
-        symbol_label = tk.Label(
-            symbol_row,
+        self.symbol_label = tk.Label(
+            self.symbol_row,
             text="Symbol",
             font=("Helvetica Neue", 10, "bold"),
             bg=self.card_bg,
             fg=self.text_primary,
         )
-        symbol_label.pack(side="left")
+        self.symbol_label.pack(side="left")
 
         self.symbol_var = tk.StringVar(value=self.symbol)
         self.symbol_entry = tk.Entry(
-            symbol_row,
+            self.symbol_row,
             textvariable=self.symbol_var,
             width=12,
             relief="flat",
             bd=1,
             highlightthickness=1,
-            highlightbackground=self.shadow_color,
-            highlightcolor=self.shadow_color,
-            bg="#ffffff",
-            fg="#111111",
-            insertbackground="#111111",
+            highlightbackground=self.entry_border,
+            highlightcolor=self.entry_border,
+            bg=self.entry_bg,
+            fg=self.entry_fg,
+            insertbackground=self.entry_fg,
             font=("Helvetica Neue", 10),
         )
         self.symbol_entry.pack(side="left", padx=(8, 8), ipadx=2, ipady=4)
@@ -386,8 +395,8 @@ class ShareCardApp:
         self.symbol_entry.bind("<Down>", self.focus_suggestion_list)
         self.symbol_entry.bind("<FocusOut>", self.hide_symbol_suggestions)
 
-        load_button = tk.Button(
-            symbol_row,
+        self.load_button = tk.Button(
+            self.symbol_row,
             text="Load",
             command=self.load_symbol,
             takefocus=0,
@@ -403,7 +412,7 @@ class ShareCardApp:
             padx=8,
             pady=2,
         )
-        load_button.pack(side="left")
+        self.load_button.pack(side="left")
 
         self.suggestion_frame = tk.Toplevel(self.root)
         self.suggestion_frame.withdraw()
@@ -433,7 +442,7 @@ class ShareCardApp:
         self.root.bind("<Button-1>", self.on_global_click, add=True)
 
         self.validation_label = tk.Label(
-            card,
+            self.card_frame,
             text="",
             font=("Helvetica Neue", 9),
             bg=self.card_bg,
@@ -442,9 +451,9 @@ class ShareCardApp:
         )
         self.validation_label.pack(fill="x", pady=(0, 8))
 
-        info_frame = tk.Frame(card, bg=self.card_bg)
-        info_frame.pack(fill="x")
-        info_frame.columnconfigure(1, weight=1)
+        self.info_frame = tk.Frame(self.card_frame, bg=self.card_bg)
+        self.info_frame.pack(fill="x")
+        self.info_frame.columnconfigure(1, weight=1)
 
         label_style = {
             "font": ("Helvetica Neue", 10),
@@ -459,24 +468,36 @@ class ShareCardApp:
             "anchor": "e",
         }
 
-        tk.Label(info_frame, text="Open", **label_style).grid(row=0, column=0, sticky="w", pady=2)
-        self.opening_label = tk.Label(info_frame, text="--", **value_style)
+        open_label = tk.Label(self.info_frame, text="Open", **label_style)
+        open_label.grid(row=0, column=0, sticky="w", pady=2)
+        self.info_labels.append(open_label)
+        self.opening_label = tk.Label(self.info_frame, text="--", **value_style)
         self.opening_label.grid(row=0, column=1, sticky="e", pady=2)
+        self.value_labels.append(self.opening_label)
 
-        tk.Label(info_frame, text="Close", **label_style).grid(row=1, column=0, sticky="w", pady=2)
-        self.close_label = tk.Label(info_frame, text="--", **value_style)
+        close_label = tk.Label(self.info_frame, text="Close", **label_style)
+        close_label.grid(row=1, column=0, sticky="w", pady=2)
+        self.info_labels.append(close_label)
+        self.close_label = tk.Label(self.info_frame, text="--", **value_style)
         self.close_label.grid(row=1, column=1, sticky="e", pady=2)
+        self.value_labels.append(self.close_label)
 
-        tk.Label(info_frame, text="Daily Change %", **label_style).grid(row=2, column=0, sticky="w", pady=2)
-        self.change_pct_label = tk.Label(info_frame, text="--", **value_style)
+        change_pct_label = tk.Label(self.info_frame, text="Daily Change %", **label_style)
+        change_pct_label.grid(row=2, column=0, sticky="w", pady=2)
+        self.info_labels.append(change_pct_label)
+        self.change_pct_label = tk.Label(self.info_frame, text="--", **value_style)
         self.change_pct_label.grid(row=2, column=1, sticky="e", pady=2)
+        self.value_labels.append(self.change_pct_label)
 
-        tk.Label(info_frame, text="Daily Change $", **label_style).grid(row=3, column=0, sticky="w", pady=2)
-        self.change_dollar_label = tk.Label(info_frame, text="--", **value_style)
+        change_dollar_label = tk.Label(self.info_frame, text="Daily Change $", **label_style)
+        change_dollar_label.grid(row=3, column=0, sticky="w", pady=2)
+        self.info_labels.append(change_dollar_label)
+        self.change_dollar_label = tk.Label(self.info_frame, text="--", **value_style)
         self.change_dollar_label.grid(row=3, column=1, sticky="e", pady=2)
+        self.value_labels.append(self.change_dollar_label)
 
         self.trend_label = tk.Label(
-            card,
+            self.card_frame,
             text="1 Week trend",
             font=("Helvetica Neue", 9),
             bg=self.card_bg,
@@ -485,11 +506,11 @@ class ShareCardApp:
         )
         self.trend_label.pack(fill="x", pady=(10, 4))
 
-        range_frame = tk.Frame(card, bg=self.card_bg)
-        range_frame.pack(fill="x", pady=(0, 6))
+        self.range_frame = tk.Frame(self.card_frame, bg=self.card_bg)
+        self.range_frame.pack(fill="x", pady=(0, 6))
         for range_item in CHART_RANGES:
             link = tk.Label(
-                range_frame,
+                self.range_frame,
                 text=range_item.label,
                 font=("Helvetica Neue", 9),
                 bg=self.card_bg,
@@ -502,7 +523,7 @@ class ShareCardApp:
         self.update_chart_range_buttons()
 
         self.chart_canvas = tk.Canvas(
-            card,
+            self.card_frame,
             height=110,
             bg=self.card_bg,
             highlightthickness=1,
@@ -511,8 +532,8 @@ class ShareCardApp:
         self.chart_canvas.pack(fill="x")
         self.chart_canvas.bind("<Configure>", self.on_chart_resize)
 
-        refresh_button = tk.Button(
-            card,
+        self.refresh_button = tk.Button(
+            self.card_frame,
             text="Refresh",
             command=self.refresh,
             takefocus=0,
@@ -528,10 +549,14 @@ class ShareCardApp:
             padx=10,
             pady=2,
         )
-        refresh_button.pack(anchor="e", pady=(12, 0))
+        self.refresh_button.pack(anchor="e", pady=(12, 0))
 
+        self._init_colors()
+        self.apply_theme()
+        self.root.after(0, self.apply_theme)
         self.start_symbol_catalog_refresh(force=True)
         self.root.after(100, self.process_symbol_catalog_queue)
+        self.root.after(0, self.schedule_theme_check)
         self.refresh()
 
     def _resolve_color(self, name: str, fallback: str) -> str:
@@ -554,18 +579,202 @@ class ShareCardApp:
         return luminance >= 140
 
     def _init_colors(self) -> None:
-        self.bg_color = self._resolve_color("SystemButtonFace", "#f0f0f0")
-        self.card_bg = self._resolve_color("SystemWindow", "#ffffff")
-        self.text_primary = self._resolve_color("SystemWindowText", "#111111")
-        self.text_muted = self._resolve_color("SystemGrayText", "#6b7280")
-        self.button_bg = self._resolve_color("SystemButtonFace", "#e5e7eb")
-        self.button_active_bg = self._resolve_color("SystemButtonFace", "#d1d5db")
-        self.shadow_color = self._resolve_color("SystemButtonShadow", "#c7c7c7")
-        self.button_fg = self._resolve_color("SystemButtonText", self.text_primary)
-        if self._is_light_color(self.button_bg):
-            self.button_fg = "#111111"
-        elif self._is_light_color(self.text_primary):
-            self.button_fg = "#f9fafb"
+        self.is_dark_mode = self._detect_dark_mode()
+        if self.is_dark_mode:
+            self.bg_color = "#0f1114"
+            self.card_bg = "#171a1f"
+            self.text_primary = "#e8eaed"
+            self.text_muted = "#9aa3ad"
+            self.button_bg = self._resolve_color("SystemButtonFace", "#1f242b")
+            self.button_active_bg = self._resolve_color("SystemButtonFace", "#2a2f36")
+            self.shadow_color = "#2f343c"
+            if self._is_light_color(self.button_bg):
+                self.button_fg = "#111111"
+            else:
+                self.button_fg = "#f5f6f7"
+            self.entry_bg = "#12161b"
+            self.entry_fg = self.text_primary
+            self.entry_border = "#2f343c"
+            self.success_color = "#43d17a"
+            self.error_color = "#ff6b6b"
+            self.neutral_color = "#9aa3ad"
+            self.positive_color = "#43d17a"
+            self.negative_color = "#ff6b6b"
+        else:
+            self.bg_color = self._resolve_color("SystemButtonFace", "#f0f0f0")
+            self.card_bg = self._resolve_color("SystemWindow", "#ffffff")
+            self.text_primary = self._resolve_color("SystemWindowText", "#111111")
+            self.text_muted = self._resolve_color("SystemGrayText", "#6b7280")
+            self.button_bg = self._resolve_color("SystemButtonFace", "#e5e7eb")
+            self.button_active_bg = self._resolve_color("SystemButtonFace", "#d1d5db")
+            self.shadow_color = self._resolve_color("SystemButtonShadow", "#c7c7c7")
+            self.button_fg = self._resolve_color("SystemButtonText", self.text_primary)
+            if self._is_light_color(self.button_bg):
+                self.button_fg = "#111111"
+            elif self._is_light_color(self.text_primary):
+                self.button_fg = "#f9fafb"
+            self.entry_bg = "#ffffff"
+            self.entry_fg = "#111111"
+            self.entry_border = self.shadow_color
+            self.success_color = "#15803d"
+            self.error_color = "#b91c1c"
+            self.neutral_color = self.text_muted
+            self.positive_color = "#0f766e"
+            self.negative_color = "#b91c1c"
+
+    def _detect_dark_mode(self) -> bool:
+        debug = os.environ.get("SHARE_CHECKER_DEBUG_THEME", "").strip().lower() in {"1", "true", "yes"}
+        debug_log_path = Path("/tmp/sharechecker_theme.log")
+        if debug:
+            try:
+                debug_log_path.write_text(
+                    f"theme detect start platform={sys.platform} path={os.environ.get('PATH','')}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+        if sys.platform == "darwin":
+            try:
+                result = subprocess.run(
+                    ["/usr/bin/defaults", "read", "-g", "AppleInterfaceStyle"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if debug:
+                    print("theme defaults:", result.returncode, result.stdout.strip())
+                    try:
+                        with debug_log_path.open("a", encoding="utf-8") as log_file:
+                            log_file.write(
+                            f"defaults rc={result.returncode} out={result.stdout.strip()}\n",
+                            )
+                    except Exception:
+                        pass
+                return result.returncode == 0 and "Dark" in result.stdout
+            except Exception as exc:
+                if debug:
+                    try:
+                        with debug_log_path.open("a", encoding="utf-8") as log_file:
+                            log_file.write(f"defaults error={exc}\n")
+                    except Exception:
+                        pass
+            try:
+                result = subprocess.run(
+                    [
+                        "/usr/bin/osascript",
+                        "-e",
+                        "tell application \"System Events\" to tell appearance preferences to get dark mode",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if debug:
+                    print("theme osascript:", result.returncode, result.stdout.strip())
+                    try:
+                        with debug_log_path.open("a", encoding="utf-8") as log_file:
+                            log_file.write(
+                            f"osascript rc={result.returncode} out={result.stdout.strip()}\n",
+                            )
+                    except Exception:
+                        pass
+                return result.returncode == 0 and result.stdout.strip().lower() == "true"
+            except Exception as exc:
+                if debug:
+                    try:
+                        with debug_log_path.open("a", encoding="utf-8") as log_file:
+                            log_file.write(f"osascript error={exc}\n")
+                    except Exception:
+                        pass
+                return False
+        return not self._is_light_color("SystemWindow")
+
+    def apply_theme(self) -> None:
+        debug = os.environ.get("SHARE_CHECKER_DEBUG_THEME", "").strip().lower() in {"1", "true", "yes"}
+        if debug:
+            try:
+                with Path("/tmp/sharechecker_theme.log").open("a", encoding="utf-8") as log_file:
+                    log_file.write(f"apply_theme dark={self.is_dark_mode}\n")
+            except Exception:
+                pass
+        self.root.configure(bg=self.bg_color)
+        if self.card_frame is not None:
+            self.card_frame.configure(bg=self.card_bg)
+        if self.symbol_row is not None:
+            self.symbol_row.configure(bg=self.card_bg)
+        if self.info_frame is not None:
+            self.info_frame.configure(bg=self.card_bg)
+        if self.range_frame is not None:
+            self.range_frame.configure(bg=self.card_bg)
+
+        if self.title_label is not None:
+            self.title_label.configure(bg=self.card_bg, fg=self.text_primary)
+        if self.status_label is not None:
+            self.status_label.configure(bg=self.card_bg, fg=self.text_muted)
+        if self.symbol_label is not None:
+            self.symbol_label.configure(bg=self.card_bg, fg=self.text_primary)
+        if self.validation_label is not None:
+            self.validation_label.configure(bg=self.card_bg, fg=self.neutral_color)
+        if self.trend_label is not None:
+            self.trend_label.configure(bg=self.card_bg, fg=self.text_muted)
+
+        if self.symbol_entry is not None:
+            self.symbol_entry.configure(
+                bg=self.entry_bg,
+                fg=self.entry_fg,
+                insertbackground=self.entry_fg,
+                highlightbackground=self.entry_border,
+                highlightcolor=self.entry_border,
+            )
+
+        if self.load_button is not None:
+            self.load_button.configure(
+                bg=self.button_bg,
+                activebackground=self.button_active_bg,
+                fg=self.button_fg,
+                activeforeground=self.button_fg,
+                highlightbackground=self.shadow_color,
+                highlightcolor=self.shadow_color,
+            )
+        if self.refresh_button is not None:
+            self.refresh_button.configure(
+                bg=self.button_bg,
+                activebackground=self.button_active_bg,
+                fg=self.button_fg,
+                activeforeground=self.button_fg,
+                highlightbackground=self.shadow_color,
+                highlightcolor=self.shadow_color,
+            )
+
+        for label in self.info_labels:
+            label.configure(bg=self.card_bg, fg=self.text_muted)
+        for label in self.value_labels:
+            label.configure(bg=self.card_bg, fg=self.text_primary)
+
+        if self.suggestion_frame is not None:
+            self.suggestion_frame.configure(bg=self.card_bg)
+        if self.suggestion_list is not None:
+            self.suggestion_list.configure(
+                bg=self.card_bg,
+                fg=self.text_primary,
+                highlightbackground=self.shadow_color,
+                selectbackground=self.button_active_bg,
+                selectforeground=self.text_primary,
+            )
+
+        if self.chart_canvas is not None:
+            self.chart_canvas.configure(bg=self.card_bg, highlightbackground=self.shadow_color)
+
+        self.update_chart_range_buttons()
+        self.draw_trend(self.last_history, self.last_history_dates)
+
+    def schedule_theme_check(self) -> None:
+        if self.root.winfo_exists():
+            current_mode = self._detect_dark_mode()
+            if current_mode != self.is_dark_mode:
+                self._init_colors()
+                self.apply_theme()
+            self.root.after(2000, self.schedule_theme_check)
 
     def update_title(self, symbol: str) -> None:
         self.root.title(f"{symbol}")
@@ -600,7 +809,7 @@ class ShareCardApp:
             self.start_symbol_catalog_refresh(force=False)
         elif candidate not in self.nyse_symbols:
             messagebox.showwarning("Invalid Symbol", f"'{candidate}' is not in the supported US symbol list.")
-            self.validation_label.config(text="Symbol not found in US symbol list.", fg="red")
+            self.validation_label.config(text="Symbol not found in US symbol list.", fg=self.error_color)
             return
 
         previous_symbol = self.symbol
@@ -612,7 +821,7 @@ class ShareCardApp:
         else:
             company = self.symbol_names.get(candidate, "").strip()
             label_text = company or "Valid US-listed symbol."
-            self.validation_label.config(text=label_text, fg="green")
+            self.validation_label.config(text=label_text, fg=self.success_color)
 
     def schedule_symbol_validation(self, _event: object | None = None) -> None:
         if self.symbol_validation_after_id:
@@ -627,24 +836,24 @@ class ShareCardApp:
     def validate_symbol_realtime(self) -> None:
         candidate = self.symbol_var.get().strip().upper()
         if not candidate:
-            self.validation_label.config(text="", fg="black")
+            self.validation_label.config(text="", fg=self.text_primary)
             return
 
         if self.nyse_symbols is None:
             if self.symbol_catalog_loading:
-                self.validation_label.config(text="Checking symbol list...", fg="gray")
+                self.validation_label.config(text="Checking symbol list...", fg=self.neutral_color)
             elif self.symbol_catalog_error:
-                self.validation_label.config(text="Symbol list unavailable right now.", fg="gray")
+                self.validation_label.config(text="Symbol list unavailable right now.", fg=self.neutral_color)
             else:
-                self.validation_label.config(text="Loading symbol list...", fg="gray")
+                self.validation_label.config(text="Loading symbol list...", fg=self.neutral_color)
             return
 
         if candidate in self.nyse_symbols:
             company = self.symbol_names.get(candidate, "").strip()
             label_text = company or "Valid US-listed symbol."
-            self.validation_label.config(text=label_text, fg="green")
+            self.validation_label.config(text=label_text, fg=self.success_color)
         else:
-            self.validation_label.config(text="Symbol not found in US symbol list.", fg="red")
+            self.validation_label.config(text="Symbol not found in US symbol list.", fg=self.error_color)
 
     def update_symbol_suggestions(self) -> None:
         if self.suppress_suggestions_once:
@@ -749,7 +958,7 @@ class ShareCardApp:
                 return
 
         self.symbol_catalog_loading = True
-        self.validation_label.config(text="Loading symbol list...", fg="gray")
+        self.validation_label.config(text="Loading symbol list...", fg=self.neutral_color)
         thread = threading.Thread(target=self._refresh_symbol_catalog_worker, daemon=True)
         thread.start()
 
