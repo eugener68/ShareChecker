@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
 
 
@@ -7,8 +9,8 @@ a = Analysis(
     ["app.py"],
     pathex=["."],
     binaries=[],
-    datas=[("Icon.png", ".")],
-    hiddenimports=[],
+    datas=[("Icon.png", ".")] + collect_data_files("tzdata"),
+    hiddenimports=["tzdata"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

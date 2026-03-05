@@ -33,6 +33,12 @@ class ChartRange:
     date_format: str
 
 
+@dataclass(frozen=True)
+class ChartPayload:
+    rows: list[tuple[str, float, float]]
+    current_price: float | None
+
+
 CHART_RANGES = (
     ChartRange("1D", "1d", "5m", "1 Day", "%H:%M"),
     ChartRange("1W", "7d", "1d", "1 Week", "%b-%d"),
@@ -47,6 +53,7 @@ CHART_RANGE_BY_KEY = {range_item.key: range_item for range_item in CHART_RANGES}
 class ShareMetrics:
     symbol: str
     opening_price: float
+    current_price: float
     close_price_for_card: float
     daily_change_dollar: float
     daily_change_percent: float
@@ -108,7 +115,7 @@ def fetch_yahoo_ohlc(
     range_value: str = "7d",
     interval: str = "1d",
     date_format: str = "%b-%d",
-) -> list[tuple[str, float, float]]:
+) -> ChartPayload:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {
         "range": range_value,
@@ -137,6 +144,11 @@ def fetch_yahoo_ohlc(
     closes = quote.get("close") or []
     timestamps = result.get("timestamp") or []
 
+    meta = result.get("meta") or {}
+    current_price = meta.get("regularMarketPrice")
+    if current_price is not None:
+        current_price = float(current_price)
+
     rows: list[tuple[str, float, float]] = []
     for ts_value, open_value, close_value in zip(timestamps, opens, closes):
         if open_value is None or close_value is None:
@@ -147,7 +159,7 @@ def fetch_yahoo_ohlc(
     if len(rows) < 2:
         raise ValueError("Could not load enough valid OHLC rows from Yahoo data.")
 
-    return rows
+    return ChartPayload(rows=rows, current_price=current_price)
 
 
 def fetch_supported_symbols() -> dict[str, str]:
@@ -216,7 +228,7 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
     verify = get_tls_verify_setting()
 
     try:
-        rows = fetch_yahoo_ohlc(symbol, proxy, verify)
+        chart_payload = fetch_yahoo_ohlc(symbol, proxy, verify)
     except Exception as exc:
         network_hint = (
             "Set HTTPS_PROXY / HTTP_PROXY in the same terminal. "
@@ -227,6 +239,7 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
 
     nyse_open = is_nyse_open()
 
+    rows = chart_payload.rows
     _, latest_open, latest_close = rows[-1]
     _, _, previous_close = rows[-2]
     history = [close for _date, _open, close in rows]
@@ -239,12 +252,15 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
     else:
         close_for_card = latest_close
 
+    current_price = chart_payload.current_price if chart_payload.current_price is not None else latest_close
+
     daily_change_dollar = close_for_card - today_open
     daily_change_percent = (daily_change_dollar / today_open * 100.0) if today_open else 0.0
 
     return ShareMetrics(
         symbol=symbol.upper(),
         opening_price=today_open,
+        current_price=current_price,
         close_price_for_card=close_for_card,
         daily_change_dollar=daily_change_dollar,
         daily_change_percent=daily_change_percent,
@@ -258,7 +274,7 @@ def fetch_chart_history(symbol: str, chart_range: ChartRange) -> tuple[list[floa
     proxy = get_runtime_proxy()
     verify = get_tls_verify_setting()
 
-    rows = fetch_yahoo_ohlc(
+    chart_payload = fetch_yahoo_ohlc(
         symbol,
         proxy,
         verify,
@@ -267,8 +283,8 @@ def fetch_chart_history(symbol: str, chart_range: ChartRange) -> tuple[list[floa
         date_format=chart_range.date_format,
     )
 
-    history = [close for _date, _open, close in rows]
-    history_dates = [date for date, _open, _close in rows]
+    history = [close for _date, _open, close in chart_payload.rows]
+    history_dates = [date for date, _open, _close in chart_payload.rows]
     return history, history_dates
 
 
@@ -298,6 +314,8 @@ class ShareCardApp:
         self.symbol_label: tk.Label | None = None
         self.load_button: tk.Button | None = None
         self.refresh_button: tk.Button | None = None
+        self.current_title_label: tk.Label | None = None
+        self.current_value_label: tk.Label | None = None
         self.info_labels: list[tk.Label] = []
         self.value_labels: list[tk.Label] = []
         self.last_history: list[float] = []
@@ -306,8 +324,8 @@ class ShareCardApp:
 
         self.root = tk.Tk()
         self.root.title(f"{self.symbol}")
-        self.root.geometry("440x520")
-        self.root.minsize(380, 420)
+        self.root.geometry("440x560")
+        self.root.minsize(380, 460)
         self.root.resizable(True, True)
         icon_loaded = False
         png_icon_path = Path(__file__).with_name("Icon.png")
@@ -475,25 +493,32 @@ class ShareCardApp:
         self.opening_label.grid(row=0, column=1, sticky="e", pady=2)
         self.value_labels.append(self.opening_label)
 
+        self.current_title_label = tk.Label(self.info_frame, text="Current", **label_style)
+        self.current_title_label.grid(row=1, column=0, sticky="w", pady=2)
+        self.info_labels.append(self.current_title_label)
+        self.current_value_label = tk.Label(self.info_frame, text="--", **value_style)
+        self.current_value_label.grid(row=1, column=1, sticky="e", pady=2)
+        self.value_labels.append(self.current_value_label)
+
         close_label = tk.Label(self.info_frame, text="Close", **label_style)
-        close_label.grid(row=1, column=0, sticky="w", pady=2)
+        close_label.grid(row=2, column=0, sticky="w", pady=2)
         self.info_labels.append(close_label)
         self.close_label = tk.Label(self.info_frame, text="--", **value_style)
-        self.close_label.grid(row=1, column=1, sticky="e", pady=2)
+        self.close_label.grid(row=2, column=1, sticky="e", pady=2)
         self.value_labels.append(self.close_label)
 
         change_pct_label = tk.Label(self.info_frame, text="Daily Change %", **label_style)
-        change_pct_label.grid(row=2, column=0, sticky="w", pady=2)
+        change_pct_label.grid(row=3, column=0, sticky="w", pady=2)
         self.info_labels.append(change_pct_label)
         self.change_pct_label = tk.Label(self.info_frame, text="--", **value_style)
-        self.change_pct_label.grid(row=2, column=1, sticky="e", pady=2)
+        self.change_pct_label.grid(row=3, column=1, sticky="e", pady=2)
         self.value_labels.append(self.change_pct_label)
 
         change_dollar_label = tk.Label(self.info_frame, text="Daily Change $", **label_style)
-        change_dollar_label.grid(row=3, column=0, sticky="w", pady=2)
+        change_dollar_label.grid(row=4, column=0, sticky="w", pady=2)
         self.info_labels.append(change_dollar_label)
         self.change_dollar_label = tk.Label(self.info_frame, text="--", **value_style)
-        self.change_dollar_label.grid(row=3, column=1, sticky="e", pady=2)
+        self.change_dollar_label.grid(row=4, column=1, sticky="e", pady=2)
         self.value_labels.append(self.change_dollar_label)
 
         self.trend_label = tk.Label(
@@ -687,6 +712,23 @@ class ShareCardApp:
                     except Exception:
                         pass
                 return False
+        if sys.platform == "win32":
+            try:
+                import winreg
+
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                ) as key:
+                    apps_use_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return apps_use_light == 0
+            except Exception as exc:
+                if debug:
+                    try:
+                        with debug_log_path.open("a", encoding="utf-8") as log_file:
+                            log_file.write(f"winreg error={exc}\n")
+                    except Exception:
+                        pass
         return not self._is_light_color("SystemWindow")
 
     def apply_theme(self) -> None:
@@ -784,11 +826,14 @@ class ShareCardApp:
         return CHART_RANGE_BY_KEY.get(self.chart_range_key, CHART_RANGES[1])
 
     def update_chart_range_buttons(self) -> None:
+        label_color = self.text_muted
+        active_color = self.text_primary
+        base_bg = self.card_bg
         for key, button in self.range_buttons.items():
             if key == self.chart_range_key:
-                button.config(fg=self.text_primary, font=("Helvetica Neue", 9, "underline"))
+                button.config(bg=base_bg, fg=active_color, font=("Helvetica Neue", 9, "underline"))
             else:
-                button.config(fg=self.text_muted, font=("Helvetica Neue", 9))
+                button.config(bg=base_bg, fg=label_color, font=("Helvetica Neue", 9))
 
     def set_chart_range(self, key: str) -> None:
         if key == self.chart_range_key:
@@ -1003,6 +1048,8 @@ class ShareCardApp:
         except Exception as exc:
             self.status_label.config(text="Unable to load quote. Check network and try again.", fg=self.negative_color)
             self.opening_label.config(text="--", fg=self.text_primary)
+            if self.current_value_label is not None:
+                self.current_value_label.config(text="--", fg=self.text_primary)
             self.close_label.config(text="--", fg=self.text_primary)
             self.change_pct_label.config(text="--", fg=self.text_primary)
             self.change_dollar_label.config(text="--", fg=self.text_primary)
@@ -1018,6 +1065,14 @@ class ShareCardApp:
         change_color = self.positive_color if data.daily_change_dollar >= 0 else self.negative_color
 
         self.opening_label.config(text=f"${data.opening_price:,.2f}")
+        if self.current_title_label is not None and self.current_value_label is not None:
+            if data.market_open:
+                self.current_title_label.grid()
+                self.current_value_label.grid()
+                self.current_value_label.config(text=f"${data.current_price:,.2f}")
+            else:
+                self.current_title_label.grid_remove()
+                self.current_value_label.grid_remove()
         self.close_label.config(text=f"${data.close_price_for_card:,.2f} {close_suffix}".rstrip())
         self.change_pct_label.config(text=f"{data.daily_change_percent:+.2f}%", fg=change_color)
         self.change_dollar_label.config(text=f"${data.daily_change_dollar:+,.2f}", fg=change_color)
