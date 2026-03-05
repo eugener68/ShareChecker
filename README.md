@@ -6,17 +6,21 @@ Default symbol at startup: `DOX`.
 
 ## Features
 - Opening price
+- Current price (shown only while the market is open)
 - Close price
-  - If NYSE is still open, card uses previous day close
+  - If NYSE/NASDAQ is still open, card uses previous day close
 - Daily change (%)
 - Daily change ($)
 - Interactive symbol input (`Load` button + Enter key)
 - Real-time symbol validation against online US symbol lists
 - Prefix-based autocomplete suggestions while typing (scrollable)
+- Trend chart with range selector (1 Day, 1 Week, 1 Month, 1 Year, YTD)
+- Auto theme based on system dark mode (macOS and Windows)
 
 ## Requirements
 - Windows or macOS
 - Python 3.11+ (Python 3.12 recommended for packaging)
+  - Includes `tzdata` for reliable time zone data in packaged builds
 
 ## Setup
 1. Create and activate a virtual environment.
@@ -48,7 +52,7 @@ Optional notarization (Developer ID):
 # One-time setup
 xcrun notarytool store-credentials "notary-profile" \
   --apple-id "your@appleid.com" \
-  --team-id "HBY3U59ZBD" \
+  --team-id "<YOUR_TEAM_ID> \
   --password "app-specific-password"
 
 # Build + notarize
