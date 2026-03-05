@@ -23,6 +23,25 @@ NASDAQ_SYMBOLS_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.t
 SYMBOL_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
+@dataclass(frozen=True)
+class ChartRange:
+    key: str
+    range_value: str
+    interval: str
+    label: str
+    date_format: str
+
+
+CHART_RANGES = (
+    ChartRange("1D", "1d", "5m", "1 Day", "%H:%M"),
+    ChartRange("1W", "7d", "1d", "1 Week", "%b-%d"),
+    ChartRange("1M", "1mo", "1d", "1 Month", "%b-%d"),
+    ChartRange("1Y", "1y", "1wk", "1 Year", "%b-%y"),
+    ChartRange("YTD", "ytd", "1wk", "YTD", "%b-%y"),
+)
+CHART_RANGE_BY_KEY = {range_item.key: range_item for range_item in CHART_RANGES}
+
+
 @dataclass
 class ShareMetrics:
     symbol: str
@@ -81,11 +100,18 @@ def get_tls_verify_setting() -> bool | str:
     return True
 
 
-def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list[tuple[str, float, float]]:
+def fetch_yahoo_ohlc(
+    symbol: str,
+    proxy: str | None,
+    verify: bool | str,
+    range_value: str = "7d",
+    interval: str = "1d",
+    date_format: str = "%b-%d",
+) -> list[tuple[str, float, float]]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {
-        "range": "7d",
-        "interval": "1d",
+        "range": range_value,
+        "interval": interval,
         "includePrePost": "false",
         "events": "div,splits",
     }
@@ -114,7 +140,7 @@ def fetch_yahoo_ohlc(symbol: str, proxy: str | None, verify: bool | str) -> list
     for ts_value, open_value, close_value in zip(timestamps, opens, closes):
         if open_value is None or close_value is None:
             continue
-        date_label = datetime.fromtimestamp(ts_value, NYSE_TZ).strftime("%b-%d")
+        date_label = datetime.fromtimestamp(ts_value, NYSE_TZ).strftime(date_format)
         rows.append((date_label, float(open_value), float(close_value)))
 
     if len(rows) < 2:
@@ -227,6 +253,24 @@ def fetch_metrics(symbol: str) -> ShareMetrics:
     )
 
 
+def fetch_chart_history(symbol: str, chart_range: ChartRange) -> tuple[list[float], list[str]]:
+    proxy = get_runtime_proxy()
+    verify = get_tls_verify_setting()
+
+    rows = fetch_yahoo_ohlc(
+        symbol,
+        proxy,
+        verify,
+        range_value=chart_range.range_value,
+        interval=chart_range.interval,
+        date_format=chart_range.date_format,
+    )
+
+    history = [close for _date, _open, close in rows]
+    history_dates = [date for date, _open, _close in rows]
+    return history, history_dates
+
+
 class ShareCardApp:
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol.upper()
@@ -242,13 +286,16 @@ class ShareCardApp:
         self.suggestion_list: tk.Listbox | None = None
         self.suppress_suggestions_once = False
         self.chart_canvas: tk.Canvas | None = None
+        self.trend_label: tk.Label | None = None
+        self.chart_range_key = "1W"
+        self.range_buttons: dict[str, tk.Label] = {}
         self.last_history: list[float] = []
         self.last_history_dates: list[str] = []
         self.symbol_catalog_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.root = tk.Tk()
         self.root.title(f"{self.symbol}")
-        self.root.geometry("440x470")
+        self.root.geometry("440x520")
         self.root.minsize(380, 420)
         self.root.resizable(True, True)
         icon_loaded = False
@@ -319,8 +366,21 @@ class ShareCardApp:
         symbol_label.pack(side="left")
 
         self.symbol_var = tk.StringVar(value=self.symbol)
-        self.symbol_entry = tk.Entry(symbol_row, textvariable=self.symbol_var, width=12, relief="solid")
-        self.symbol_entry.pack(side="left", padx=(8, 8), ipadx=2, ipady=1)
+        self.symbol_entry = tk.Entry(
+            symbol_row,
+            textvariable=self.symbol_var,
+            width=12,
+            relief="flat",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.shadow_color,
+            highlightcolor=self.shadow_color,
+            bg="#ffffff",
+            fg="#111111",
+            insertbackground="#111111",
+            font=("Helvetica Neue", 10),
+        )
+        self.symbol_entry.pack(side="left", padx=(8, 8), ipadx=2, ipady=4)
         self.symbol_entry.bind("<Return>", self.load_symbol)
         self.symbol_entry.bind("<KeyRelease>", self.schedule_symbol_validation)
         self.symbol_entry.bind("<Down>", self.focus_suggestion_list)
@@ -415,15 +475,31 @@ class ShareCardApp:
         self.change_dollar_label = tk.Label(info_frame, text="--", **value_style)
         self.change_dollar_label.grid(row=3, column=1, sticky="e", pady=2)
 
-        trend_label = tk.Label(
+        self.trend_label = tk.Label(
             card,
-            text="7-day trend",
+            text="1 Week trend",
             font=("Helvetica Neue", 9),
             bg=self.card_bg,
             fg=self.text_muted,
             anchor="w",
         )
-        trend_label.pack(fill="x", pady=(10, 4))
+        self.trend_label.pack(fill="x", pady=(10, 4))
+
+        range_frame = tk.Frame(card, bg=self.card_bg)
+        range_frame.pack(fill="x", pady=(0, 6))
+        for range_item in CHART_RANGES:
+            link = tk.Label(
+                range_frame,
+                text=range_item.label,
+                font=("Helvetica Neue", 9),
+                bg=self.card_bg,
+                fg=self.text_muted,
+                cursor="hand2",
+            )
+            link.bind("<Button-1>", lambda _event, key=range_item.key: self.set_chart_range(key))
+            link.pack(side="left", padx=(0, 10))
+            self.range_buttons[range_item.key] = link
+        self.update_chart_range_buttons()
 
         self.chart_canvas = tk.Canvas(
             card,
@@ -494,6 +570,25 @@ class ShareCardApp:
     def update_title(self, symbol: str) -> None:
         self.root.title(f"{symbol}")
         self.title_label.config(text=f"{symbol}")
+
+    def current_chart_range(self) -> ChartRange:
+        return CHART_RANGE_BY_KEY.get(self.chart_range_key, CHART_RANGES[1])
+
+    def update_chart_range_buttons(self) -> None:
+        for key, button in self.range_buttons.items():
+            if key == self.chart_range_key:
+                button.config(fg=self.text_primary, font=("Helvetica Neue", 9, "underline"))
+            else:
+                button.config(fg=self.text_muted, font=("Helvetica Neue", 9))
+
+    def set_chart_range(self, key: str) -> None:
+        if key == self.chart_range_key:
+            return
+        if key not in CHART_RANGE_BY_KEY:
+            return
+        self.chart_range_key = key
+        self.update_chart_range_buttons()
+        self.refresh()
 
     def load_symbol(self, _event: object | None = None) -> None:
         candidate = self.symbol_var.get().strip().upper()
@@ -695,6 +790,7 @@ class ShareCardApp:
 
         try:
             data = fetch_metrics(self.symbol)
+            chart_history, chart_dates = fetch_chart_history(self.symbol, self.current_chart_range())
         except Exception as exc:
             self.status_label.config(text="Unable to load quote. Check network and try again.", fg=self.negative_color)
             self.opening_label.config(text="--", fg=self.text_primary)
@@ -718,7 +814,9 @@ class ShareCardApp:
         self.change_dollar_label.config(text=f"${data.daily_change_dollar:+,.2f}", fg=change_color)
         self.status_label.config(text="Quote updated.", fg=self.text_muted)
         self.update_symbol_input_state()
-        self.draw_trend(data.history, data.history_dates)
+        if self.trend_label is not None:
+            self.trend_label.config(text=f"{self.current_chart_range().label} trend")
+        self.draw_trend(chart_history, chart_dates)
         return True
 
     def run(self) -> None:
