@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 from zoneinfo import ZoneInfo
+import sys
 import tkinter as tk
 from tkinter import messagebox
 
@@ -57,10 +58,25 @@ def get_tls_verify_setting() -> bool | str:
     if insecure in {"1", "true", "yes", "on"}:
         return False
 
+    invalid_keys: list[str] = []
     for key in ("SHARE_CHECKER_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
         value = os.environ.get(key)
         if value:
-            return value
+            if Path(value).expanduser().is_file():
+                return value
+            invalid_keys.append(key)
+
+    for key in invalid_keys:
+        os.environ.pop(key, None)
+
+    try:
+        import certifi
+
+        certifi_path = Path(certifi.where())
+        if certifi_path.is_file():
+            return str(certifi_path)
+    except Exception:
+        pass
 
     return True
 
@@ -230,33 +246,42 @@ class ShareCardApp:
         self.last_history_dates: list[str] = []
         self.symbol_catalog_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
-        self.bg_color = "SystemButtonFace"
-        self.card_bg = "SystemWindow"
-        self.text_primary = "SystemWindowText"
-        self.text_muted = "SystemGrayText"
-        self.positive_color = "#0f766e"
-        self.negative_color = "#b91c1c"
-
         self.root = tk.Tk()
         self.root.title(f"{self.symbol}")
-        self.root.geometry("440x430")
-        self.root.minsize(380, 380)
+        self.root.geometry("440x470")
+        self.root.minsize(380, 420)
         self.root.resizable(True, True)
-        self.root.configure(bg=self.bg_color)
-        icon_path = Path(__file__).with_name("app.ico")
-        if icon_path.exists():
-            try:
-                self.root.iconbitmap(str(icon_path))
-            except tk.TclError:
-                pass
+        icon_loaded = False
         png_icon_path = Path(__file__).with_name("Icon.png")
         if png_icon_path.exists():
             try:
                 icon_image = tk.PhotoImage(file=str(png_icon_path))
                 self.root.iconphoto(True, icon_image)
                 self._icon_image = icon_image
+                icon_loaded = True
             except tk.TclError:
                 pass
+        if not icon_loaded and sys.platform == "darwin":
+            icns_path = Path(__file__).with_name("AppIcon.icns")
+            if icns_path.exists():
+                try:
+                    self.root.iconbitmap(str(icns_path))
+                    icon_loaded = True
+                except tk.TclError:
+                    pass
+        if not icon_loaded:
+            icon_path = Path(__file__).with_name("app.ico")
+            if icon_path.exists():
+                try:
+                    self.root.iconbitmap(str(icon_path))
+                except tk.TclError:
+                    pass
+
+        self._init_colors()
+        self.root.configure(bg=self.bg_color)
+
+        self.positive_color = "#0f766e"
+        self.negative_color = "#b91c1c"
 
         card = tk.Frame(self.root, bg=self.card_bg, bd=1, relief="solid", padx=16, pady=14)
         card.pack(fill="both", expand=True, padx=20, pady=18)
@@ -306,12 +331,17 @@ class ShareCardApp:
             text="Load",
             command=self.load_symbol,
             takefocus=0,
-            relief="flat",
-            bd=0,
+            relief="solid",
+            bd=1,
             highlightthickness=0,
-            bg="SystemButtonFace",
-            activebackground="SystemButtonFace",
-            fg="SystemButtonText",
+            bg=self.button_bg,
+            activebackground=self.button_active_bg,
+            fg=self.button_fg,
+            activeforeground=self.button_fg,
+            highlightbackground=self.shadow_color,
+            highlightcolor=self.shadow_color,
+            padx=8,
+            pady=2,
         )
         load_button.pack(side="left")
 
@@ -329,7 +359,7 @@ class ShareCardApp:
             yscrollcommand=self.suggestion_scrollbar.set,
             borderwidth=1,
             highlightthickness=1,
-            highlightbackground="SystemButtonShadow",
+            highlightbackground=self.shadow_color,
         )
         self.suggestion_scrollbar.config(command=self.suggestion_list.yview)
         self.suggestion_list.pack(side="left", fill="both", expand=True)
@@ -400,7 +430,7 @@ class ShareCardApp:
             height=110,
             bg=self.card_bg,
             highlightthickness=1,
-            highlightbackground="SystemButtonShadow",
+            highlightbackground=self.shadow_color,
         )
         self.chart_canvas.pack(fill="x")
         self.chart_canvas.bind("<Configure>", self.on_chart_resize)
@@ -410,18 +440,56 @@ class ShareCardApp:
             text="Refresh",
             command=self.refresh,
             takefocus=0,
-            relief="flat",
-            bd=0,
+            relief="solid",
+            bd=1,
             highlightthickness=0,
-            bg="SystemButtonFace",
-            activebackground="SystemButtonFace",
-            fg="SystemButtonText",
+            bg=self.button_bg,
+            activebackground=self.button_active_bg,
+            fg=self.button_fg,
+            activeforeground=self.button_fg,
+            highlightbackground=self.shadow_color,
+            highlightcolor=self.shadow_color,
+            padx=10,
+            pady=2,
         )
         refresh_button.pack(anchor="e", pady=(12, 0))
 
         self.start_symbol_catalog_refresh(force=True)
         self.root.after(100, self.process_symbol_catalog_queue)
         self.refresh()
+
+    def _resolve_color(self, name: str, fallback: str) -> str:
+        try:
+            self.root.winfo_rgb(name)
+            return name
+        except tk.TclError:
+            return fallback
+
+    def _is_light_color(self, color: str) -> bool:
+        try:
+            r, g, b = self.root.winfo_rgb(color)
+        except tk.TclError:
+            return True
+        # Normalize 16-bit RGB to 0-255 and compute relative luminance.
+        r8 = r / 257
+        g8 = g / 257
+        b8 = b / 257
+        luminance = 0.2126 * r8 + 0.7152 * g8 + 0.0722 * b8
+        return luminance >= 140
+
+    def _init_colors(self) -> None:
+        self.bg_color = self._resolve_color("SystemButtonFace", "#f0f0f0")
+        self.card_bg = self._resolve_color("SystemWindow", "#ffffff")
+        self.text_primary = self._resolve_color("SystemWindowText", "#111111")
+        self.text_muted = self._resolve_color("SystemGrayText", "#6b7280")
+        self.button_bg = self._resolve_color("SystemButtonFace", "#e5e7eb")
+        self.button_active_bg = self._resolve_color("SystemButtonFace", "#d1d5db")
+        self.shadow_color = self._resolve_color("SystemButtonShadow", "#c7c7c7")
+        self.button_fg = self._resolve_color("SystemButtonText", self.text_primary)
+        if self._is_light_color(self.button_bg):
+            self.button_fg = "#111111"
+        elif self._is_light_color(self.text_primary):
+            self.button_fg = "#f9fafb"
 
     def update_title(self, symbol: str) -> None:
         self.root.title(f"{symbol}")
@@ -698,7 +766,7 @@ class ShareCardApp:
             y = top_pad + (1.0 - ratio) * inner_h
             points.extend([x, y])
 
-        grid_color = "SystemButtonShadow"
+        grid_color = self.shadow_color
         label_color = self.text_muted
 
         for i in range(5):

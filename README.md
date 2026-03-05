@@ -15,8 +15,8 @@ Default symbol at startup: `DOX`.
 - Prefix-based autocomplete suggestions while typing (scrollable)
 
 ## Requirements
-- Windows
-- Python 3.11+ (tested with newer versions too)
+- Windows or macOS
+- Python 3.11+ (Python 3.12 recommended for packaging)
 
 ## Setup
 1. Create and activate a virtual environment.
@@ -29,6 +29,44 @@ Default symbol at startup: `DOX`.
 ```powershell
 python app.py
 ```
+
+## Packaging (Standalone Apps)
+Packaging tools are more stable on Python 3.12. It is recommended to build
+distributables using a 3.12 virtual environment.
+
+### macOS (.app with py2app)
+```bash
+python -m venv .venv312
+source .venv312/bin/activate
+pip install -r requirements.txt -r requirements-packaging.txt
+python setup.py py2app
+```
+Output: `dist/ShareChecker.app`
+
+Optional notarization (Developer ID):
+```bash
+# One-time setup
+xcrun notarytool store-credentials "notary-profile" \
+  --apple-id "your@appleid.com" \
+  --team-id "HBY3U59ZBD" \
+  --password "app-specific-password"
+
+# Build + notarize
+./scripts/build_macos.sh --notarize
+```
+To use a different keychain profile:
+```bash
+NOTARY_PROFILE="your-profile" ./scripts/build_macos.sh --notarize
+```
+
+### Windows (.exe with PyInstaller)
+```powershell
+py -3.12 -m venv .venv312
+.venv312\Scripts\activate
+pip install -r requirements.txt -r requirements-packaging.txt
+pyinstaller build_windows.spec
+```
+Output: `dist\ShareChecker.exe`
 
 Optional startup symbol:
 ```powershell
